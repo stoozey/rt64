@@ -7,6 +7,8 @@
 
 #include "rt64_vulkan.h"
 
+#include <functional>
+
 #include <algorithm>
 #include <cmath>
 #include <climits>
@@ -90,6 +92,16 @@ namespace RT64 {
         VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
         VK_EXT_LAYER_SETTINGS_EXTENSION_NAME,
     };
+
+    // Additional extensions requested by external integrations (e.g. VR runtimes). They're only enabled if they're supported.
+
+    static std::function<std::vector<std::string>()> AdditionalInstanceExtensionsCallback;
+    static std::function<std::vector<std::string>(void *)> AdditionalDeviceExtensionsCallback;
+
+    void SetVulkanAdditionalExtensions(std::function<std::vector<std::string>()> instanceCallback, std::function<std::vector<std::string>(void *)> deviceCallback) {
+        AdditionalInstanceExtensionsCallback = instanceCallback;
+        AdditionalDeviceExtensionsCallback = deviceCallback;
+    }
 
     // Common functions.
 
@@ -3488,9 +3500,20 @@ namespace RT64 {
 #   if DLSS_ENABLED
         const std::unordered_set<std::string> dlssExtensions = DLSS::getRequiredDeviceExtensionsVulkan(this);
 #   endif
+        std::unordered_set<std::string> additionalExtensions;
+        if (AdditionalDeviceExtensionsCallback) {
+            for (const std::string &extension : AdditionalDeviceExtensionsCallback(physicalDevice)) {
+                if (RequiredDeviceExtensions.find(extension) == RequiredDeviceExtensions.end()) {
+                    additionalExtensions.insert(extension);
+                }
+            }
+        }
+
+        std::unordered_set<std::string> missingAdditionalExtensions = additionalExtensions;
         for (uint32_t i = 0; i < extensionCount; i++) {
             const std::string extensionName(availableExtensions[i].extensionName);
             missingRequiredExtensions.erase(extensionName);
+            missingAdditionalExtensions.erase(extensionName);
 
             if (OptionalDeviceExtensions.find(extensionName) != OptionalDeviceExtensions.end()) {
                 supportedOptionalExtensions.insert(extensionName);
@@ -3500,6 +3523,13 @@ namespace RT64 {
                 supportedOptionalExtensions.insert(extensionName);
             }
 #       endif
+            else if (additionalExtensions.find(extensionName) != additionalExtensions.end()) {
+                supportedOptionalExtensions.insert(extensionName);
+            }
+        }
+
+        for (const std::string &extension : missingAdditionalExtensions) {
+            fprintf(stderr, "Additional device extension %s was requested but it's not supported.\n", extension.c_str());
         }
 
         if (!missingRequiredExtensions.empty()) {
@@ -4120,10 +4150,21 @@ namespace RT64 {
         }
 #   endif
 
+        std::unordered_set<std::string> additionalExtensions;
+        if (AdditionalInstanceExtensionsCallback) {
+            for (const std::string &extension : AdditionalInstanceExtensionsCallback()) {
+                if (requiredExtensions.find(extension) == requiredExtensions.end()) {
+                    additionalExtensions.insert(extension);
+                }
+            }
+        }
+
         std::unordered_set<std::string> missingRequiredExtensions = requiredExtensions;
+        std::unordered_set<std::string> missingAdditionalExtensions = additionalExtensions;
         for (uint32_t i = 0; i < extensionCount; i++) {
             const std::string extensionName(availableExtensions[i].extensionName);
             missingRequiredExtensions.erase(extensionName);
+            missingAdditionalExtensions.erase(extensionName);
 
             if (OptionalInstanceExtensions.find(extensionName) != OptionalInstanceExtensions.end()) {
                 supportedOptionalExtensions.insert(extensionName);
@@ -4133,6 +4174,13 @@ namespace RT64 {
                 supportedOptionalExtensions.insert(extensionName);
             }
 #       endif
+            else if (additionalExtensions.find(extensionName) != additionalExtensions.end()) {
+                supportedOptionalExtensions.insert(extensionName);
+            }
+        }
+
+        for (const std::string &extension : missingAdditionalExtensions) {
+            fprintf(stderr, "Additional instance extension %s was requested but it's not supported.\n", extension.c_str());
         }
 
         if (!missingRequiredExtensions.empty()) {

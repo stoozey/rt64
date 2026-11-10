@@ -48,6 +48,43 @@ namespace RT64 {
         for (size_t s = 0; s < p.curFrame->orthographicScenes.size(); s++) {
             processScene(p, p.curFrame->orthographicScenes[s], s, false);
         }
+
+        if (p.vrEye != nullptr) {
+            processVR(p);
+        }
+    }
+
+    void ProjectionProcessor::processVR(const ProcessParams &p) {
+        // Apply the eye's view on top of the (possibly interpolated) world camera. This is done as a separate pass over every
+        // transform so each one is only modified once, regardless of how many scenes or projections reference it.
+        const VRRenderEye &vrEye = *p.vrEye;
+        for (uint32_t w : p.curFrame->workloads) {
+            Workload &workload = p.workloadQueue->workloads[w];
+            DrawData &drawData = workload.drawData;
+            const size_t transformCount = drawData.viewTransforms.size();
+            for (uint32_t t = 0; t < transformCount; t++) {
+                if (!vrEye.isWorldTransform(drawData, t)) {
+                    continue;
+                }
+
+                const interop::RSPViewport &viewport = drawData.rspViewports[t];
+                const hlslpp::float3 viewportScale(viewport.scale.x, viewport.scale.y, viewport.scale.z);
+                const hlslpp::float3 viewportTranslate(viewport.translate.x, viewport.translate.y, viewport.translate.z);
+                hlslpp::float4x4 viewMatrix = drawData.modViewTransforms[t];
+                hlslpp::float4x4 projMatrix = drawData.modProjTransforms[t];
+                vrEye.applyToWorldCamera(viewMatrix, projMatrix, viewportScale, viewportTranslate);
+                drawData.modViewTransforms[t] = viewMatrix;
+                drawData.modProjTransforms[t] = projMatrix;
+                drawData.modViewProjTransforms[t] = hlslpp::mul(viewMatrix, projMatrix);
+
+                hlslpp::float4x4 prevViewMatrix = drawData.prevViewTransforms[t];
+                hlslpp::float4x4 prevProjMatrix = drawData.prevProjTransforms[t];
+                vrEye.applyToWorldCamera(prevViewMatrix, prevProjMatrix, viewportScale, viewportTranslate);
+                drawData.prevViewTransforms[t] = prevViewMatrix;
+                drawData.prevProjTransforms[t] = prevProjMatrix;
+                drawData.prevViewProjTransforms[t] = hlslpp::mul(prevViewMatrix, prevProjMatrix);
+            }
+        }
     }
 
     void ProjectionProcessor::processScene(const ProcessParams &p, const GameScene &scene, size_t sceneIndex, bool useScissorDetection) {

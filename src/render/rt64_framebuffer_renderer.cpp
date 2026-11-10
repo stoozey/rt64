@@ -1472,9 +1472,75 @@ namespace RT64 {
         RenderViewport rawViewportOriginal(0.0f, 0.0f, originalWidth, commonHeight);
         uint32_t vertexTestZFaceIndicesStart = 0;
         int32_t vertexTestZCallIndex = -1;
+
+        // When rendering for a VR headset, the draws to the color image that is sent to the headset are classified. The world
+        // camera already received the eye's view in the projection processor and is left as is. Full screen effects keep
+        // covering the entire eye. Everything else is considered part of the HUD and is moved onto the virtual panel.
+        enum class VRDrawMode {
+            None,
+            World,
+            FullScreen,
+            HUD
+        };
+
+        const VRRenderEye *vrEye = p.vrEye;
+        const bool vrTarget = (vrEye != nullptr) && (p.fbStorage->colorTarget != nullptr) && (fbPair.colorImage.address == vrEye->targetAddress);
+        const int32_t vrRegionRight = (vrEye != nullptr) ? int32_t(lround(vrEye->regionWidth * p.resolutionScale.x)) : 0;
+        const int32_t vrRegionBottom = (vrEye != nullptr) ? int32_t(lround(vrEye->regionHeight * p.resolutionScale.y)) : 0;
+        auto vrCoversScissorWidth = [&](const FixedRect &rect) {
+            return (rect.ulx <= fbPair.scissorRect.ulx) && (rect.lrx >= fbPair.scissorRect.lrx);
+        };
+
+        auto vrCoversScissor = [&](const FixedRect &rect) {
+            return vrCoversScissorWidth(rect) && (rect.uly <= fbPair.scissorRect.uly) && (rect.lry >= fbPair.scissorRect.lry);
+        };
+
+        auto vrClampRect = [&](RenderRect &rect) {
+            rect.left = std::clamp(rect.left, 0, vrRegionRight);
+            rect.right = std::clamp(rect.right, rect.left, vrRegionRight);
+            rect.top = std::clamp(rect.top, 0, vrRegionBottom);
+            rect.bottom = std::clamp(rect.bottom, rect.top, vrRegionBottom);
+        };
+
+        auto vrApplyDrawMode = [&](RenderViewport &viewport, RenderRect &scissor, VRDrawMode mode) {
+            switch (mode) {
+            case VRDrawMode::World:
+                // The eye's frustum always covers the entire image, so any scissoring the game did for its own camera is discarded.
+                scissor = RenderRect(0, 0, vrRegionRight, vrRegionBottom);
+                break;
+            case VRDrawMode::HUD:
+                vrEye->mapToHUD(viewport.x, viewport.y, viewport.width, viewport.height, p.resolutionScale);
+                vrEye->mapToHUD(scissor.left, scissor.top, scissor.right, scissor.bottom, p.resolutionScale);
+                vrClampRect(scissor);
+                break;
+            case VRDrawMode::FullScreen:
+            case VRDrawMode::None:
+            default:
+                break;
+            }
+        };
+
         for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
             const Projection &proj = fbPair.projections[pr];
             const bool perspProj = (proj.type == Projection::Type::Perspective);
+            VRDrawMode projVRMode = VRDrawMode::None;
+            if (vrTarget) {
+                switch (proj.type) {
+                case Projection::Type::Perspective:
+                    // Other perspective projections (e.g. the pause menu or the rotating action button) are drawn as part of the HUD.
+                    projVRMode = vrEye->isWorldTransform(drawData, proj.transformsIndex) ? VRDrawMode::World : VRDrawMode::HUD;
+                    break;
+                case Projection::Type::Orthographic:
+                    // Orthographic geometry that covers the entire screen is a screen effect (e.g. transition wipes).
+                    projVRMode = vrCoversScissor(proj.scissorRect) ? VRDrawMode::FullScreen : VRDrawMode::HUD;
+                    break;
+                case Projection::Type::Rectangle:
+                case Projection::Type::Triangle:
+                default:
+                    projVRMode = VRDrawMode::HUD;
+                    break;
+                }
+            }
 
 #       if RT_ENABLED
             // TODO: Move heuristics of RT proj elsewhere?
@@ -1540,6 +1606,12 @@ namespace RT64 {
                     }
 
                     clearRect.rect = convertFixedRect(fixedRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+
+                    // Fills that span the whole width are clears, fades or letterboxing and must keep covering the entire eye.
+                    if (vrTarget && !vrCoversScissorWidth(fixedRect)) {
+                        vrEye->mapToHUD(clearRect.rect.left, clearRect.rect.top, clearRect.rect.right, clearRect.rect.bottom, p.resolutionScale);
+                        vrClampRect(clearRect.rect);
+                    }
                 }
                 else if (call.callDesc.extendedType != DrawExtendedType::None) {
                     switch (call.callDesc.extendedType) {
@@ -1689,6 +1761,16 @@ namespace RT64 {
                         }
 
                         triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+
+                        if (vrTarget) {
+                            VRDrawMode callVRMode = projVRMode;
+                            if (proj.type == Projection::Type::Rectangle) {
+                                // Rectangles that span the whole width are full screen effects (e.g. backgrounds or captured frames).
+                                callVRMode = vrCoversScissorWidth(fixedRect) ? VRDrawMode::FullScreen : VRDrawMode::HUD;
+                            }
+
+                            vrApplyDrawMode(triangles.viewport, triangles.scissor, callVRMode);
+                        }
                         
                         if (triangles.vertexTestZ) {
                             if ((proj.type == Projection::Type::Perspective) || (proj.type == Projection::Type::Orthographic)) {

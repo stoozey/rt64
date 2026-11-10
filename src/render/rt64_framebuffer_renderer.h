@@ -9,6 +9,7 @@
 #include "common/rt64_emulator_configuration.h"
 #include "common/rt64_user_configuration.h"
 #include "hle/rt64_framebuffer_manager.h"
+#include "hle/rt64_vr.h"
 #include "hle/rt64_workload.h"
 #include "preset/rt64_preset_scene.h"
 #include "shared/rt64_frame_params.h"
@@ -147,6 +148,7 @@ namespace RT64 {
             bool postBlendNoise;
             bool postBlendNoiseNegative;
             uint32_t maxGameCall;
+            const VRRenderEye *vrEye = nullptr;
         };
 
         FramebufferRenderer(RenderWorker *worker, bool rtSupport, UserConfiguration::GraphicsAPI graphicsAPI, const ShaderLibrary *shaderLibrary);

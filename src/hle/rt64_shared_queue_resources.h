@@ -12,6 +12,7 @@
 #include "render/rt64_render_target_manager.h"
 
 #include "rt64_framebuffer_manager.h"
+#include "rt64_vr.h"
 
 #if RT_ENABLED
 #   include "render/rt64_raytracing_resources.h"
@@ -35,6 +36,8 @@ namespace RT64 {
         UserConfiguration userConfig;
         EnhancementConfiguration enhancementConfig;
         EmulatorConfiguration emulatorConfig;
+        VRConfiguration vrConfig;
+        bool vrActive = false;
         bool swapChainSizeChanged = false;
         bool rtConfigChanged = true;
         bool userConfigChanged = true;
@@ -83,6 +86,11 @@ namespace RT64 {
         void setEmulatorConfig(const EmulatorConfiguration &newEmulatorConfig) {
             std::scoped_lock<std::mutex> configurationLock(configurationMutex);
             emulatorConfig = newEmulatorConfig;
+        }
+
+        void setVRConfig(const VRConfiguration &newVRConfig) {
+            std::scoped_lock<std::mutex> configurationLock(configurationMutex);
+            vrConfig = newVRConfig;
         }
 
         void setEnhancementConfig(const EnhancementConfiguration &newEnhancementConfig) {

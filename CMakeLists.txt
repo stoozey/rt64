@@ -16,6 +16,7 @@ if (${RT64_BUILD_EXAMPLES})
 endif()
 
 option(RT64_SDL_WINDOW_VULKAN "Build RT64 to expect an SDL Window outside of Windows" OFF)
+option(RT64_OPENVR "Build RT64 with support for OpenVR (SteamVR). Requires an 'openvr_api' target to be defined before RT64 is added." OFF)
 
 if (NOT ${RT64_STATIC})
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -356,6 +357,7 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rsp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_state.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_vi.cpp"
+    "${PROJECT_SOURCE_DIR}/src/hle/rt64_vr.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_workload.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_workload_queue.cpp"
 
@@ -439,6 +441,17 @@ set_target_properties(rt64 PROPERTIES PREFIX "")
 target_link_libraries(rt64 re-spirv)
 target_link_libraries(rt64 nfd)
 target_link_libraries(rt64 libzstd_static)
+
+# Add VR support.
+if (RT64_OPENVR)
+    if (NOT TARGET openvr_api)
+        message(FATAL_ERROR "RT64_OPENVR is enabled but no 'openvr_api' target was defined.")
+    endif()
+
+    target_sources(rt64 PRIVATE "${PROJECT_SOURCE_DIR}/src/vr/rt64_vr_openvr.cpp")
+    target_compile_definitions(rt64 PRIVATE RT64_OPENVR_ENABLED=1)
+    target_link_libraries(rt64 openvr_api)
+endif()
 
 # Add tools.
 add_subdirectory(src/tools/texture_hasher)

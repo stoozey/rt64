@@ -25,6 +25,7 @@
 #include "rt64_application_window.h"
 #include "rt64_interpreter.h"
 #include "rt64_shared_queue_resources.h"
+#include "rt64_vr.h"
 
 #if RT_ENABLED
 #   include "render/rt64_raytracing_shader_cache.h"
@@ -106,6 +107,7 @@ namespace RT64 {
         UserConfiguration userConfig;
         EmulatorConfiguration emulatorConfig;
         EnhancementConfiguration enhancementConfig;
+        VRConfiguration vrConfig;
         ApplicationConfiguration appConfig;
         UserConfiguration::GraphicsAPI chosenGraphicsAPI;
         bool freeCamClearQueued;
@@ -133,6 +135,7 @@ namespace RT64 {
         std::unique_ptr<PresentQueue> presentQueue;
         std::unique_ptr<SharedQueueResources> sharedQueueResources;
         std::unique_ptr<RenderInterface> renderInterface;
+        std::unique_ptr<VRProvider> vrProvider;
         std::atomic<bool> debuggerPaused;
         uint64_t frameCounter;
         uint32_t threadsAvailable;
@@ -171,6 +174,9 @@ namespace RT64 {
         void updateUserConfig(bool discardFBs);
         void updateEmulatorConfig();
         void updateEnhancementConfig();
+        void updateVRConfig();
+        bool isVRActive() const;
+        void recenterVR();
         void setFullScreen(bool fullscreen);
     };
 };

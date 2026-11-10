@@ -102,8 +102,10 @@ namespace RT64 {
         UserConfiguration::Filtering filtering;
         uint32_t viOriginalRate;
         uint32_t targetRate;
+        bool vrActive;
         {
             std::scoped_lock<std::mutex> configurationLock(ext.sharedResources->configurationMutex);
+            vrActive = ext.sharedResources->vrActive;
             resolutionScale = ext.sharedResources->resolutionScale;
             presentationMode = ext.sharedResources->enhancementConfig.presentation.mode;
             refreshRate = ext.sharedResources->userConfig.refreshRate;
@@ -184,7 +186,10 @@ namespace RT64 {
                     }
                 }
 
-                if (presentFb->interpolationEnabled) {
+                // When VR is active, the headset receives every frame directly from the workload queue and the window is only a
+                // mirror of it. The mirror only presents the first frame and holds the workload mutex while it does so, as the
+                // workload queue keeps rendering both eyes to the same target.
+                if (presentFb->interpolationEnabled && !vrActive) {
                     framesToPresent = frameCounters.count;
                 }
                 else {

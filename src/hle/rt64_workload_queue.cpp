@@ -11,6 +11,7 @@
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
 namespace RT64 {
+    static const int ReferenceWidth = 320;
     static const int ReferenceHeight = 240;
     static const int ReferenceInterlacedHeight = 480;
 
@@ -229,6 +230,36 @@ namespace RT64 {
             break;
         }
 
+        // Override the configuration with what the headset requires when VR is active.
+        workloadConfig.vrConfig = ext.sharedResources->vrConfig;
+        workloadConfig.vrActive = workloadConfig.vrConfig.enabled && (ext.vrProvider != nullptr) && ext.vrProvider->isActive();
+        if (workloadConfig.vrActive) {
+            // The eye's frustum replaces the game's aspect ratio, so the image is always rendered with the original one.
+            workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
+            workloadConfig.aspectRatioScale = 1.0f;
+            workloadConfig.extAspectPercentage = 0.0f;
+
+            // Pick an integer scale that gives at least the pixel density the runtime recommends in both axes. Integer scales
+            // avoid the horizontal misalignment corrections that are used for fractional scales.
+            uint32_t recommendedWidth = 0, recommendedHeight = 0;
+            ext.vrProvider->getRecommendedRenderSize(recommendedWidth, recommendedHeight);
+            const float renderScale = std::clamp(workloadConfig.vrConfig.renderScale, 0.25f, 4.0f);
+            const float scaleX = (float(recommendedWidth) * renderScale) / float(ReferenceWidth);
+            const float scaleY = (float(recommendedHeight) * renderScale) / float(ReferenceHeight);
+            const float vrMultiplier = std::clamp(ceilf(std::max(scaleX, scaleY) - 0.25f), 1.0f, 12.0f);
+            workloadConfig.resolutionScale = { vrMultiplier, vrMultiplier };
+            workloadConfig.downsampleMultiplier = 1;
+            ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
+
+            // Generate as many frames as the headset displays.
+            const uint32_t vrRate = ext.vrProvider->getRefreshRate();
+            if (vrRate > 0) {
+                workloadConfig.targetRate = vrRate;
+            }
+        }
+
+        ext.sharedResources->vrActive = workloadConfig.vrActive;
+
         // Store the rate that was chosen for the configuration.
         ext.sharedResources->targetRate = workloadConfig.targetRate;
 
@@ -289,7 +320,7 @@ namespace RT64 {
     void WorkloadQueue::threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
         const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
         float deltaTimeMs, RenderTargetKey overrideTargetKey, int32_t overrideTargetFbPairIndex, RenderTarget *overrideTarget,
-        uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles)
+        uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles, const VRRenderEye *vrEye)
     {
 #   if ENABLE_HIGH_RESOLUTION_RENDERER
         std::scoped_lock<std::mutex> managerLock(ext.sharedResources->workloadMutex);
@@ -300,7 +331,7 @@ namespace RT64 {
         rendererProfiler.start();
 
         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
-        const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
+        const bool processProjections = aspectRatioAdjustment || prevFrame.matched || curFrame.isDebuggerCameraEnabled(*this) || (vrEye != nullptr);
         bool uploadProjections = false;
         if (processProjections) {
             ProjectionProcessor::ProcessParams projParams;
@@ -311,6 +342,7 @@ namespace RT64 {
             projParams.curFrameWeight = curFrameWeight;
             projParams.prevFrameWeight = prevFrameWeight;
             projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
+            projParams.vrEye = vrEye;
             projectionProcessor.process(projParams);
             projectionProcessor.upload(projParams);
             uploadProjections = true;
@@ -623,6 +655,7 @@ namespace RT64 {
                     drawParams.postBlendNoise = workloadConfig.postBlendNoise;
                     drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
                     drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
+                    drawParams.vrEye = vrEye;
                     framebufferRenderer->addFramebuffer(drawParams);
                 }
                 
@@ -824,6 +857,10 @@ namespace RT64 {
             ext.textureCache->decrementLock();
         }
 
+        if (vrEye != nullptr) {
+            threadSubmitVREye(*vrEye, overrideTargetKey, overrideTarget);
+        }
+
         if ((overrideTarget != nullptr) && !usingMSAA) {
             targetManager.removeOverride(overrideTargetKey);
         }
@@ -833,6 +870,36 @@ namespace RT64 {
         rendererProfiler.log();
         rendererProfiler.reset();
 #   endif
+    }
+
+    void WorkloadQueue::threadSubmitVREye(const VRRenderEye &vrEye, RenderTargetKey vrTargetKey, RenderTarget *overrideTarget) {
+        // The caller must hold the workload mutex so the render targets can't be modified by other threads.
+        RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
+        RenderTarget *eyeTarget = (overrideTarget != nullptr) ? overrideTarget : &targetManager.get(vrTargetKey, true);
+        if (eyeTarget->isEmpty()) {
+            return;
+        }
+
+        RenderWorker *worker = ext.workloadGraphicsWorker;
+        std::scoped_lock<std::mutex> workerLock(workerMutex);
+        if (eyeTarget->usesResolve()) {
+            RenderWorkerExecution workerExecution(worker);
+            eyeTarget->resolveTarget(worker, ext.shaderLibrary);
+        }
+
+        // The eye's image is the region of the color image the VI would display, scaled to the target's resolution.
+        const float regionWidth = vrEye.regionWidth * eyeTarget->resolutionScale.x;
+        const float regionHeight = vrEye.regionHeight * eyeTarget->resolutionScale.y;
+        VRSubmitTexture submitTexture;
+        submitTexture.texture = eyeTarget->getResolvedTexture();
+        submitTexture.format = eyeTarget->format;
+        submitTexture.width = eyeTarget->width;
+        submitTexture.height = eyeTarget->height;
+        submitTexture.uMin = 0.0f;
+        submitTexture.vMin = 0.0f;
+        submitTexture.uMax = std::clamp(regionWidth / float(std::max(eyeTarget->width, 1U)), 0.0f, 1.0f);
+        submitTexture.vMax = std::clamp(regionHeight / float(std::max(eyeTarget->height, 1U)), 0.0f, 1.0f);
+        ext.vrProvider->submitEye(worker, vrEye.eyeIndex, submitTexture);
     }
 
     void WorkloadQueue::threadAdvanceBarrier() {
@@ -900,6 +967,13 @@ namespace RT64 {
                 // Detect the color image to interpolate for this workload.
                 RenderTargetKey interpolationTargetKey;
                 int32_t interpolationTargetFbPairIndex = -1;
+
+                // Detect the color image that should be shown in the VR headset. This is the same image that is interpolated,
+                // but it must be available even if interpolation hasn't been enabled for the framebuffer yet.
+                RenderTargetKey vrTargetKey;
+                int32_t vrTargetFbPairIndex = -1;
+                float vrRegionWidth = 0.0f;
+                float vrRegionHeight = 0.0f;
                 {
                     std::scoped_lock<std::mutex> managerLock(ext.sharedResources->managerMutex);
                     FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
@@ -926,6 +1000,11 @@ namespace RT64 {
                             colorSet.insert(colorImg.address);
                         }
 
+                        if (interpolationCandidate && vrTargetKey.isEmpty()) {
+                            vrTargetKey = RenderTargetKey(colorImg.address, colorImg.width, colorImg.siz, Framebuffer::Type::Color);
+                            vrTargetFbPairIndex = f;
+                        }
+
                         if (!interpolationCandidate || !interpolationTargetKey.isEmpty()) {
                             continue;
                         }
@@ -940,6 +1019,26 @@ namespace RT64 {
                         }
                     }
                 }
+
+                // Prefer the interpolation target if there's one, as the interpolated frames are rendered to it.
+                if (!interpolationTargetKey.isEmpty()) {
+                    vrTargetKey = interpolationTargetKey;
+                    vrTargetFbPairIndex = interpolationTargetFbPairIndex;
+                }
+
+                if (vrTargetFbPairIndex >= 0) {
+                    // The region shown in the headset covers the whole width of the color image and the height the game uses for it.
+                    const FramebufferPair &vrFbPair = workload.fbPairs[vrTargetFbPairIndex];
+                    int32_t regionHeight = std::max(vrFbPair.scissorRect.bottom(true), vrFbPair.drawColorRect.bottom(true));
+                    if (regionHeight <= 0) {
+                        regionHeight = ReferenceHeight;
+                    }
+
+                    vrRegionWidth = float(vrFbPair.colorImage.width);
+                    vrRegionHeight = float(std::min(regionHeight, int32_t(RenderTarget::MaxDimension)));
+                }
+
+                const bool vrFrames = workloadConfig.vrActive && (vrTargetFbPairIndex >= 0) && (vrRegionWidth > 0.0f);
 
                 float prevFrameWeight = 0.0f;
                 float curFrameWeight = 1.0f;
@@ -1036,7 +1135,8 @@ namespace RT64 {
                 int64_t renderTimeTotalMicro = 0;
                 for (uint32_t frame = 0; (frame < displayFrames) && !skipWorkloadNow; frame++) {
                     // Evaluate if this frame should be skipped. Measure the current time and compare it to what frame is estimated should be have been rendered by now.
-                    if ((frame > 0) && (originalTimeMicro > 0)) {
+                    // The VR runtime paces the frames on its own, so frames are never skipped based on time when rendering for it.
+                    if (!vrFrames && (frame > 0) && (originalTimeMicro > 0)) {
                         const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                         const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                         const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -1087,8 +1187,25 @@ namespace RT64 {
                     }
 
                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
-                    threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
-                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed);
+                    if (vrFrames) {
+                        // Wait for the runtime to request a frame and render the same frame once for each eye.
+                        VRFrame vrFrame;
+                        ext.vrProvider->waitFrame(ext.workloadGraphicsWorker, vrFrame);
+                        for (uint32_t eye = 0; eye < 2; eye++) {
+                            VRRenderEye vrEye;
+                            vrEye.setup(workloadConfig.vrConfig, vrFrame, eye, vrTargetKey.address, vrRegionWidth, vrRegionHeight);
+
+                            const bool firstEye = (eye == 0);
+                            threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                                vrTargetKey, vrTargetFbPairIndex, overrideTarget, overrideModifier, firstEye && velocityUploaderUsed, firstEye && uploadExtras, tileInterpolationUsed, &vrEye);
+                        }
+
+                        ext.vrProvider->endFrame(ext.workloadGraphicsWorker);
+                    }
+                    else {
+                        threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                            interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed);
+                    }
 
                     // Add total time the frame took to render.
                     renderTimeTotalMicro += workloadTimer.elapsedMicroseconds() - renderTimeMicro;

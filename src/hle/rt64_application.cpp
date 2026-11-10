@@ -6,6 +6,7 @@
 #include "rhi/rt64_render_hooks.h"
 
 #include <filesystem>
+#include <functional>
 
 #include "common/rt64_dynamic_libraries.h"
 #include "common/rt64_elapsed_timer.h"
@@ -27,6 +28,7 @@ namespace RT64 {
 #else
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
 #endif
+    extern void SetVulkanAdditionalExtensions(std::function<std::vector<std::string>()> instanceCallback, std::function<std::vector<std::string>(void *)> deviceCallback);
 
     static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper(RenderWindow renderWindow) {
 #ifdef RT64_SDL_WINDOW_VULKAN
@@ -127,6 +129,28 @@ namespace RT64 {
 
         // Resolve the graphics API option in case it's automatic.
         chosenGraphicsAPI = UserConfiguration::resolveGraphicsAPI(userConfig.graphicsAPI);
+
+        // Connect to the VR runtime before creating the device, as it might require extensions to be enabled during its creation.
+        // The extension callbacks reference the provider, so they're always cleared when leaving this function.
+        struct VulkanExtensionsGuard {
+            ~VulkanExtensionsGuard() {
+                SetVulkanAdditionalExtensions(nullptr, nullptr);
+            }
+        } vulkanExtensionsGuard;
+
+        if (vrConfig.enabled) {
+            vrProvider = CreateOpenVRProvider();
+            if (vrProvider != nullptr) {
+                VRProvider *provider = vrProvider.get();
+                SetVulkanAdditionalExtensions(
+                    [provider]() { return provider->getVulkanInstanceExtensions(); },
+                    [provider](void *vkPhysicalDevice) { return provider->getVulkanDeviceExtensions(vkPhysicalDevice); }
+                );
+            }
+            else {
+                fprintf(stderr, "VR mode was requested but no VR runtime could be initialized. Continuing without VR.\n");
+            }
+        }
 
         // Create a render interface with the preferred backend.
         switch (chosenGraphicsAPI) {
@@ -240,6 +264,17 @@ namespace RT64 {
             break;
         }
 
+        // SteamVR doesn't accept the 16-bit UNORM format used by high precision framebuffers, so VR requires the standard color format.
+        if ((vrProvider != nullptr) && usesHDR) {
+            fprintf(stderr, "High precision framebuffers are not supported in VR mode. Using the standard color format instead.\n");
+            usesHDR = false;
+        }
+
+        if ((vrProvider != nullptr) && !vrProvider->setupGraphics(renderInterface.get(), device.get(), chosenGraphicsAPI)) {
+            fprintf(stderr, "The VR runtime doesn't support the graphics device. Continuing without VR.\n");
+            vrProvider.reset();
+        }
+
         // Call the init hook if one was attached.
         RenderHookInit *initHook = GetRenderHookInit();
         if (initHook != nullptr) {
@@ -320,6 +355,7 @@ namespace RT64 {
         sharedQueueResources->setUserConfig(userConfig, false);
         sharedQueueResources->setEmulatorConfig(emulatorConfig);
         sharedQueueResources->setEnhancementConfig(enhancementConfig);
+        sharedQueueResources->setVRConfig(vrConfig);
         sharedQueueResources->setSwapChainSize(swapChain->getWidth(), swapChain->getHeight());
         sharedQueueResources->setSwapChainRate(appWindow->getRefreshRate());
         sharedQueueResources->renderTargetManager.setMultisampling(multisampling);
@@ -337,6 +373,7 @@ namespace RT64 {
         workloadExt.textureCache = textureCache.get();
         workloadExt.shaderLibrary = shaderLibrary.get();
         workloadExt.createdGraphicsAPI = chosenGraphicsAPI;
+        workloadExt.vrProvider = vrProvider.get();
 #   if RT_ENABLED
         workloadExt.rtShaderCache = rtShaderCache.get();
         workloadExt.blueNoiseTexture = blueNoiseTexture.texture.get();
@@ -603,6 +640,9 @@ namespace RT64 {
         workloadQueue.reset();
         presentQueue.reset();
 
+        // The VR runtime must be shut down before the resources it has access to are destroyed.
+        vrProvider.reset();
+
         // Call the deinit hook if one was attached.
         RenderHookDeinit *deinitHook = GetRenderHookDeinit();
         if (deinitHook != nullptr) {
@@ -678,6 +718,20 @@ namespace RT64 {
 
     void Application::updateEnhancementConfig() {
         sharedQueueResources->setEnhancementConfig(enhancementConfig);
+    }
+
+    void Application::updateVRConfig() {
+        sharedQueueResources->setVRConfig(vrConfig);
+    }
+
+    bool Application::isVRActive() const {
+        return (vrProvider != nullptr) && vrProvider->isActive();
+    }
+
+    void Application::recenterVR() {
+        if (vrProvider != nullptr) {
+            vrProvider->requestRecenter();
+        }
     }
 
     void Application::setFullScreen(bool fullscreen) {

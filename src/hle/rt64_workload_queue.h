@@ -16,6 +16,7 @@
 #include "render/rt64_transform_processor.h"
 
 #include "rt64_shared_queue_resources.h"
+#include "rt64_vr.h"
 #include "rt64_workload.h"
 
 #if RT_ENABLED
@@ -40,6 +41,7 @@ namespace RT64 {
             TextureCache *textureCache = nullptr;
             const ShaderLibrary *shaderLibrary = nullptr;
             UserConfiguration::GraphicsAPI createdGraphicsAPI = UserConfiguration::GraphicsAPI::OptionCount;
+            VRProvider *vrProvider = nullptr;
 #       if RT_ENABLED
             const RenderTexture *blueNoiseTexture = nullptr;
             RaytracingShaderCache *rtShaderCache = nullptr;
@@ -58,6 +60,8 @@ namespace RT64 {
             bool fixRectLR = false;
             bool postBlendNoise = false;
             bool postBlendNoiseNegative = false;
+            bool vrActive = false;
+            VRConfiguration vrConfig;
         };
 
         External ext;
@@ -113,7 +117,9 @@ namespace RT64 {
         void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
             const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
             float deltaTimeMs, RenderTargetKey overrideTargetKey, int32_t overrideTargetFbPairIndex, RenderTarget *overrideTarget,
-            uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles);
+            uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles, const VRRenderEye *vrEye = nullptr);
+
+        void threadSubmitVREye(const VRRenderEye &vrEye, RenderTargetKey vrTargetKey, RenderTarget *overrideTarget);
 
         void threadAdvanceBarrier();
         void threadAdvanceWorkloadId(uint64_t newWorkloadId);
